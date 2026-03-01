@@ -1,0 +1,217 @@
+name: Workflow 4 | RCA Pattern Detection | LLM Cascade Analysis + ServiceNow Problem Record
+description: Detects clusters of related incidents, performs LLM root cause analysis and creates a ServiceNow Problem record linking all related incidents
+enabled: true
+tags:
+  - servicenow
+  - rca
+  - problem-management
+  - llm-analysis
+  - cascade-detection
+
+consts:
+  servicenow_url: "https://dev291312.service-now.com"
+  servicenow_auth: "xxxxxxxxxxxxbbbbbbbbbbbcccccccccc"
+  es_url: "https://insignia-demo-0b4ab0.es.us-east-2.aws.elastic-cloud.com"
+  es_auth: "aaaaaabbbbbbbbbccccczzzzzzzzzzzzyyyyyyyyyyy=="
+  llm_endpoint: "/_inference/completion/.anthropic-claude-3.7-sonnet-completion"
+
+triggers:
+  - type: alert
+
+steps:
+  - name: log_raw_event
+    type: console
+    with:
+      message: |
+        [AOF RCA DEBUG] Full event dump:
+        {{ event | json }}
+        
+  - name: log_rca_trigger
+    type: console
+    with:
+      message: |
+        [AOF RCA] Cascade cluster detected:
+        Domain         : {{ event.alerts[0].kibana.alert.grouping.recipe_domain }}
+        Alert Count    : {{ event.alerts[0].kibana.alert.grouping.alert_count }}
+        Services       : {{ event.alerts[0].kibana.alert.grouping.all_services }}
+        Root Cause     : {{ event.alerts[0].kibana.alert.grouping.all_root_causes }}
+        First Seen     : {{ event.alerts[0].kibana.alert.grouping.first_occurrence }}
+        Latest         : {{ event.alerts[0].kibana.alert.grouping.latest_occurrence }}
+        Window Mins    : {{ event.alerts[0].kibana.alert.grouping.window_minutes }}
+
+  # ── 6 LLM CALLS — RCA ANALYSIS ────────────────────────────────────────────
+  - name: llm_cascade_pattern
+    type: http
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are a senior SRE performing root cause analysis. Return ONLY one sentence describing the common failure pattern across these simultaneous alerts. No markdown. No bullet points. No line breaks. One sentence only.\n\nAlert Count  : {{ event.alerts[0].kibana.alert.grouping.alert_count }}\nServices     : {{ event.alerts[0].kibana.alert.grouping.all_services }}\nError Types  : {{ event.alerts[0].kibana.alert.grouping.all_error_types }}\nRoot Causes  : {{ event.alerts[0].kibana.alert.grouping.all_root_causes }}\nDomain       : {{ event.alerts[0].kibana.alert.grouping.recipe_domain }}\nTime Window  : {{ event.alerts[0].kibana.alert.grouping.window_minutes }} minutes"
+
+  - name: llm_root_cause
+    type: http
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are a senior SRE performing root cause analysis. Return ONLY one sentence identifying the single most likely underlying root cause that triggered all these simultaneous alerts. No markdown. No bullet points. No line breaks. One sentence only.\n\nAlert Count  : {{ event.alerts[0].kibana.alert.grouping.alert_count }}\nServices     : {{ event.alerts[0].kibana.alert.grouping.all_services }}\nError Types  : {{ event.alerts[0].kibana.alert.grouping.all_error_types }}\nRoot Causes  : {{ event.alerts[0].kibana.alert.grouping.all_root_causes }}\nSample Desc  : {{ event.alerts[0].kibana.alert.grouping.sample_description }}"
+
+  - name: llm_blast_radius
+    type: http
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are a senior SRE performing root cause analysis. Return ONLY one sentence describing the full blast radius — which systems, customers and business processes were impacted. No markdown. No bullet points. No line breaks. One sentence only.\n\nAlert Count  : {{ event.alerts[0].kibana.alert.grouping.alert_count }}\nServices     : {{ event.alerts[0].kibana.alert.grouping.all_services }}\nHosts        : {{ event.alerts[0].kibana.alert.grouping.all_hosts }}\nDomain       : {{ event.alerts[0].kibana.alert.grouping.recipe_domain }}\nSample Desc  : {{ event.alerts[0].kibana.alert.grouping.sample_description }}"
+
+  - name: llm_contributing_factors
+    type: http
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are a senior SRE performing root cause analysis. Return ONLY one sentence listing the top 3 contributing factors that allowed this single root cause to cascade across multiple services simultaneously. No markdown. No bullet points. No line breaks. One sentence only.\n\nAlert Count  : {{ event.alerts[0].kibana.alert.grouping.alert_count }}\nServices     : {{ event.alerts[0].kibana.alert.grouping.all_services }}\nRoot Causes  : {{ event.alerts[0].kibana.alert.grouping.all_root_causes }}\nSample Desc  : {{ event.alerts[0].kibana.alert.grouping.sample_description }}"
+
+  - name: llm_investigation_steps
+    type: http
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are a senior SRE performing root cause analysis. Return ONLY one sentence describing the 3 most important investigation steps to confirm root cause and prevent recurrence. No markdown. No bullet points. No line breaks. One sentence only.\n\nError Types  : {{ event.alerts[0].kibana.alert.grouping.all_error_types }}\nServices     : {{ event.alerts[0].kibana.alert.grouping.all_services }}\nRoot Causes  : {{ event.alerts[0].kibana.alert.grouping.all_root_causes }}\nSample Desc  : {{ event.alerts[0].kibana.alert.grouping.sample_description }}"
+
+  - name: llm_permanent_fix
+    type: http
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are a senior SRE performing root cause analysis. Return ONLY one sentence recommending the permanent architectural or process fix to prevent this cascade pattern from recurring. No markdown. No bullet points. No line breaks. One sentence only.\n\nServices     : {{ event.alerts[0].kibana.alert.grouping.all_services }}\nRoot Causes  : {{ event.alerts[0].kibana.alert.grouping.all_root_causes }}\nSample Desc  : {{ event.alerts[0].kibana.alert.grouping.sample_description }}"
+
+  # ── CREATE SERVICENOW PROBLEM RECORD ──────────────────────────────────────
+  - name: create_problem_record
+    type: http
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/problem"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+      body:
+        short_description: "AOF RCA | {{ event.alerts[0].kibana.alert.grouping.alert_count }} simultaneous alerts — {{ event.alerts[0].kibana.alert.grouping.recipe_domain }} | {{ event.alerts[0].kibana.alert.grouping.window_minutes }} min window"
+        description: "AOF Cascade RCA | Services: {{ event.alerts[0].kibana.alert.grouping.all_services }} | First: {{ event.alerts[0].kibana.alert.grouping.first_occurrence }} | Latest: {{ event.alerts[0].kibana.alert.grouping.latest_occurrence }} | Window: {{ event.alerts[0].kibana.alert.grouping.window_minutes }} minutes | Alert count: {{ event.alerts[0].kibana.alert.grouping.alert_count }} | Hosts: {{ event.alerts[0].kibana.alert.grouping.all_hosts }}"
+        work_notes: "=== AOF ROOT CAUSE ANALYSIS — CASCADE PATTERN ===\nPATTERN          : {{ steps.llm_cascade_pattern.output.data.completion[0].result }}\nROOT CAUSE       : {{ steps.llm_root_cause.output.data.completion[0].result }}\nBLAST RADIUS     : {{ steps.llm_blast_radius.output.data.completion[0].result }}\nCONTRIBUTING     : {{ steps.llm_contributing_factors.output.data.completion[0].result }}\nINVESTIGATION    : {{ steps.llm_investigation_steps.output.data.completion[0].result }}\nPERMANENT FIX    : {{ steps.llm_permanent_fix.output.data.completion[0].result }}\nRELATED ALERTS   : {{ event.alerts[0].kibana.alert.grouping.all_services }} | First: {{ event.alerts[0].kibana.alert.grouping.first_occurrence }} | Latest: {{ event.alerts[0].kibana.alert.grouping.latest_occurrence }}"
+        priority: "1"
+        problem_state: "1"
+        category: "software"
+        caller_id: "c79cb67983df3610dbc9cb96feaad38e"
+
+  - name: log_problem_created
+    type: console
+    with:
+      message: |
+        [AOF RCA] Problem record created:
+        number : {{ steps.create_problem_record.output.data.result.number }}
+        sys_id : {{ steps.create_problem_record.output.data.result.sys_id }}
+
+  # ── FIND ALL RELATED INCIDENTS ─────────────────────────────────────────────
+  - name: find_related_incidents
+    type: http
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/incident?sysparm_query=opened_at>javascript:gs.dateGenerate('{{ event.alerts[0].kibana.alert.grouping.first_occurrence_date }}','{{ event.alerts[0].kibana.alert.grouping.first_occurrence_time }}')^opened_at<javascript:gs.dateGenerate('{{ event.alerts[0].kibana.alert.grouping.latest_occurrence_date }}','{{ event.alerts[0].kibana.alert.grouping.latest_occurrence_time }}')^active=true&sysparm_fields=sys_id,number,short_description&sysparm_limit=10&sysparm_exclude_reference_link=true"
+      method: GET
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+
+  # ── POST RCA LINK TO EACH RELATED INCIDENT ────────────────────────────────
+  - name: patch_incident_0
+    type: http
+    if: "steps.find_related_incidents.output.data.result[0].sys_id : *"
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/incident/{{ steps.find_related_incidents.output.data.result[0].sys_id }}"
+      method: PATCH
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+      body:
+        problem_id: "{{ steps.create_problem_record.output.data.result.sys_id }}"
+        work_notes: "=== AOF CASCADE RCA LINK ===\nThis incident is part of a {{ event.alerts[0].kibana.alert.grouping.alert_count }}-service cascade.\nProblem Record   : {{ steps.create_problem_record.output.data.result.number }}\nROOT CAUSE       : {{ steps.llm_root_cause.output.data.completion[0].result }}\nPERMANENT FIX    : {{ steps.llm_permanent_fix.output.data.completion[0].result }}"
+
+  - name: patch_incident_1
+    type: http
+    if: "steps.find_related_incidents.output.data.result[1].sys_id : *"
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/incident/{{ steps.find_related_incidents.output.data.result[1].sys_id }}"
+      method: PATCH
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+      body:
+        problem_id: "{{ steps.create_problem_record.output.data.result.sys_id }}"
+        work_notes: "=== AOF CASCADE RCA LINK ===\nThis incident is part of a {{ event.alerts[0].kibana.alert.grouping.alert_count }}-service cascade.\nProblem Record   : {{ steps.create_problem_record.output.data.result.number }}\nROOT CAUSE       : {{ steps.llm_root_cause.output.data.completion[0].result }}\nPERMANENT FIX    : {{ steps.llm_permanent_fix.output.data.completion[0].result }}"
+
+  - name: patch_incident_2
+    type: http
+    if: "steps.find_related_incidents.output.data.result[2].sys_id : *"
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/incident/{{ steps.find_related_incidents.output.data.result[2].sys_id }}"
+      method: PATCH
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+      body:
+        problem_id: "{{ steps.create_problem_record.output.data.result.sys_id }}"
+        work_notes: "=== AOF CASCADE RCA LINK ===\nThis incident is part of a {{ event.alerts[0].kibana.alert.grouping.alert_count }}-service cascade.\nProblem Record   : {{ steps.create_problem_record.output.data.result.number }}\nROOT CAUSE       : {{ steps.llm_root_cause.output.data.completion[0].result }}\nPERMANENT FIX    : {{ steps.llm_permanent_fix.output.data.completion[0].result }}"
+
+  - name: patch_incident_3
+    type: http
+    if: "steps.find_related_incidents.output.data.result[3].sys_id : *"
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/incident/{{ steps.find_related_incidents.output.data.result[3].sys_id }}"
+      method: PATCH
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+      body:
+        problem_id: "{{ steps.create_problem_record.output.data.result.sys_id }}"
+        work_notes: "=== AOF CASCADE RCA LINK ===\nThis incident is part of a {{ event.alerts[0].kibana.alert.grouping.alert_count }}-service cascade.\nProblem Record   : {{ steps.create_problem_record.output.data.result.number }}\nROOT CAUSE       : {{ steps.llm_root_cause.output.data.completion[0].result }}\nPERMANENT FIX    : {{ steps.llm_permanent_fix.output.data.completion[0].result }}"
+
+  # ── FINAL LOG ──────────────────────────────────────────────────────────────
+  - name: log_rca_complete
+    type: console
+    with:
+      message: |
+        [AOF RCA] Analysis complete:
+        Problem          : {{ steps.create_problem_record.output.data.result.number }}
+        Pattern          : {{ steps.llm_cascade_pattern.output.data.completion[0].result }}
+        Root Cause       : {{ steps.llm_root_cause.output.data.completion[0].result }}
+        Blast Radius     : {{ steps.llm_blast_radius.output.data.completion[0].result }}
+        Contributing     : {{ steps.llm_contributing_factors.output.data.completion[0].result }}
+        Investigation    : {{ steps.llm_investigation_steps.output.data.completion[0].result }}
+        Permanent Fix    : {{ steps.llm_permanent_fix.output.data.completion[0].result }}
+        Incidents Linked : {{ steps.find_related_incidents.output.data.result[0].number }}, {{ steps.find_related_incidents.output.data.result[1].number }}, {{ steps.find_related_incidents.output.data.result[2].number }}, {{ steps.find_related_incidents.output.data.result[3].number }}
