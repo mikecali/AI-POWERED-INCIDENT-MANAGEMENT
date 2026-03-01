@@ -1,0 +1,184 @@
+name: Workflow 3 |  ServiceNow Critical Escalation - Tier 2 | Incident Management
+description: Critical escalation for incidents unresolved after 50 minutes — reassigns to Incident Management with LLM war room briefing
+enabled: true
+tags:
+  - servicenow
+  - escalation
+  - tier2
+  - critical
+  - incident-management
+  - llm
+
+consts:
+  servicenow_url: "https://dev291312.service-now.com"
+  servicenow_auth: "aaaaaaaaaabbbbbbbbbccccccddddddd"
+  es_url: "https://insignia-demo-0b4ab0.es.us-east-2.aws.elastic-cloud.com"
+  es_auth: "xxxxxxxxxxx-yyyyyyyyyyyyyyyyy-xxxxxxzzzzzzzzzzz=="
+  llm_endpoint: "/_inference/completion/.anthropic-claude-3.7-sonnet-completion"
+
+triggers:
+  - type: alert
+
+steps:
+
+  - name: log_tier2_trigger
+    type: console
+    with:
+      message: |
+        [AOF Tier 2] CRITICAL ESCALATION triggered:
+        Recipe   : {{ event.alerts[0].kibana.alert.grouping.recipe_name }}
+        Job      : {{ event.alerts[0].kibana.alert.grouping.job_id }}
+        Domain   : {{ event.alerts[0].kibana.alert.grouping.recipe_domain }}
+        Type     : {{ event.alerts[0].kibana.alert.grouping.error_type }}
+        Message  : {{ event.alerts[0].kibana.alert.grouping.error_message }}
+        Severity : {{ event.alerts[0].kibana.alert.grouping.severity_level }}
+        Fired at : {{ event.alerts[0].kibana.alert.grouping.latest_fired }}
+        Age      : {{ event.alerts[0].kibana.alert.grouping.age_minutes }} minutes unresolved
+
+  # ── STEP 1: FIND THE OPEN INCIDENT ────────────────────────────────────────
+  - name: find_unresolved_incident
+    type: http
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/incident?sysparm_query=correlation_id=AOF-{{ event.alerts[0].kibana.alert.grouping.recipe_id }}-{{ event.alerts[0].kibana.alert.grouping.job_id }}^active=true^stateNOT IN6,7&sysparm_limit=1&sysparm_display_value=false&sysparm_exclude_reference_link=true"
+      method: GET
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+
+  - name: log_found_incident
+    type: console
+    with:
+      message: |
+        [AOF Tier 2] Found unresolved incident:
+        number          : {{ steps.find_unresolved_incident.output.data.result[0].number }}
+        sys_id          : {{ steps.find_unresolved_incident.output.data.result[0].sys_id }}
+        current_state   : {{ steps.find_unresolved_incident.output.data.result[0].state }}
+        current_priority: {{ steps.find_unresolved_incident.output.data.result[0].priority }}
+        assigned_group  : {{ steps.find_unresolved_incident.output.data.result[0].assignment_group }}
+
+  # ── STEP 2: SIX TARGETED LLM CALLS — ONE VALUE EACH ──────────────────────
+  - name: llm_situation
+    type: http
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are a senior IT incident commander. Return ONLY one sentence describing what is broken and for how long. No markdown. No line breaks. One sentence only.\n\nError Type  : {{ event.alerts[0].kibana.alert.grouping.error_type }}\nError Message: {{ event.alerts[0].kibana.alert.grouping.error_message }}\nDescription : {{ event.alerts[0].kibana.alert.grouping.error_description }}\nDomain      : {{ event.alerts[0].kibana.alert.grouping.recipe_domain }}\nAge         : {{ event.alerts[0].kibana.alert.grouping.age_minutes }} minutes unresolved"
+
+  - name: llm_business_impact
+    type: http
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are a senior IT incident commander. Return ONLY one sentence describing what business operations are at risk right now. No markdown. No line breaks. One sentence only.\n\nError Type   : {{ event.alerts[0].kibana.alert.grouping.error_type }}\nError Message: {{ event.alerts[0].kibana.alert.grouping.error_message }}\nDescription  : {{ event.alerts[0].kibana.alert.grouping.error_description }}\nDomain       : {{ event.alerts[0].kibana.alert.grouping.recipe_domain }}\nAge          : {{ event.alerts[0].kibana.alert.grouping.age_minutes }} minutes unresolved"
+
+  - name: llm_root_cause
+    type: http
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are a senior IT incident commander. Return ONLY one sentence describing the most likely technical root cause based on available evidence. No markdown. No line breaks. One sentence only.\n\nError Type   : {{ event.alerts[0].kibana.alert.grouping.error_type }}\nError Message: {{ event.alerts[0].kibana.alert.grouping.error_message }}\nDescription  : {{ event.alerts[0].kibana.alert.grouping.error_description }}"
+
+  - name: llm_actions_taken
+    type: http
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are a senior IT incident commander. Based on this incident description, return ONLY one sentence summarising what automated and manual actions have already been attempted. No markdown. No line breaks. One sentence only.\n\nError Type   : {{ event.alerts[0].kibana.alert.grouping.error_type }}\nError Message: {{ event.alerts[0].kibana.alert.grouping.error_message }}\nDescription  : {{ event.alerts[0].kibana.alert.grouping.error_description }}"
+
+  - name: llm_war_room_actions
+    type: http
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are a senior IT incident commander. Return ONLY one sentence describing what the Incident Management war room team must do in the next 10 minutes. No markdown. No line breaks. One sentence only.\n\nError Type   : {{ event.alerts[0].kibana.alert.grouping.error_type }}\nError Message: {{ event.alerts[0].kibana.alert.grouping.error_message }}\nDescription  : {{ event.alerts[0].kibana.alert.grouping.error_description }}\nDomain       : {{ event.alerts[0].kibana.alert.grouping.recipe_domain }}\nAge          : {{ event.alerts[0].kibana.alert.grouping.age_minutes }} minutes unresolved"
+
+  - name: llm_communication
+    type: http
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are a senior IT incident commander. Return ONLY one sentence describing who needs to be notified externally such as customers, regulators or partners. No markdown. No line breaks. One sentence only.\n\nError Type   : {{ event.alerts[0].kibana.alert.grouping.error_type }}\nError Message: {{ event.alerts[0].kibana.alert.grouping.error_message }}\nDescription  : {{ event.alerts[0].kibana.alert.grouping.error_description }}\nDomain       : {{ event.alerts[0].kibana.alert.grouping.recipe_domain }}"
+
+  - name: log_war_room_briefing
+    type: console
+    with:
+      message: |
+        [AOF Tier 2] War Room Briefing generated:
+        Situation       : {{ steps.llm_situation.output.data.completion[0].result }}
+        Business Impact : {{ steps.llm_business_impact.output.data.completion[0].result }}
+        Root Cause      : {{ steps.llm_root_cause.output.data.completion[0].result }}
+        Actions Taken   : {{ steps.llm_actions_taken.output.data.completion[0].result }}
+        War Room Actions: {{ steps.llm_war_room_actions.output.data.completion[0].result }}
+        Communication   : {{ steps.llm_communication.output.data.completion[0].result }}
+
+  # ── STEP 3: REASSIGN TO INCIDENT MANAGEMENT + WAR ROOM WORK NOTE ──────────
+  - name: escalate_to_incident_management
+    type: http
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/incident/{{ steps.find_unresolved_incident.output.data.result[0].sys_id }}"
+      method: PATCH
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+      body:
+        assignment_group: "Incident Management"
+        priority: 1
+        urgency: 1
+        impact: 1
+        escalation: 2
+        state: 2
+        work_notes: "=== AOF TIER 2 CRITICAL ESCALATION — WAR ROOM BRIEFING ===\nEscalated at         : {{ event.alerts[0].kibana.alert.grouping.latest_fired }}\nMinutes Unresolved   : {{ event.alerts[0].kibana.alert.grouping.age_minutes }} minutes\nSLA Status           : CRITICAL — Tier 1 breached at 20 mins, Tier 2 breached at 50 mins\n\nSITUATION            : {{ steps.llm_situation.output.data.completion[0].result }}\nBUSINESS IMPACT      : {{ steps.llm_business_impact.output.data.completion[0].result }}\nROOT CAUSE HYPOTHESIS: {{ steps.llm_root_cause.output.data.completion[0].result }}\nACTIONS TAKEN        : {{ steps.llm_actions_taken.output.data.completion[0].result }}\nWAR ROOM ACTIONS     : {{ steps.llm_war_room_actions.output.data.completion[0].result }}\nCOMMUNICATION NEEDED : {{ steps.llm_communication.output.data.completion[0].result }}\n\nCorrelation ID       : AOF-{{ event.alerts[0].kibana.alert.grouping.recipe_id }}-{{ event.alerts[0].kibana.alert.grouping.job_id }}\nAOF Alert ID         : {{ event.alerts[0].kibana.alert.grouping.alert_id }}"
+
+  # ── STEP 4: POST CUSTOMER VISIBLE COMMENT ─────────────────────────────────
+  - name: post_customer_comment
+    type: http
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/incident/{{ steps.find_unresolved_incident.output.data.result[0].sys_id }}"
+      method: PATCH
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+      body:
+        comments: "We are aware this incident has exceeded our target resolution time. The Incident Management team has been engaged and a war room has been initiated. We will provide an update within 15 minutes. We apologise for the impact this is causing."
+
+  # ── FINAL LOG ──────────────────────────────────────────────────────────────
+  - name: log_tier2_result
+    type: console
+    with:
+      message: |
+        [AOF Tier 2] CRITICAL ESCALATION completed:
+        Incident         : {{ steps.find_unresolved_incident.output.data.result[0].number }}
+        Reassigned to    : Incident Management
+        Escalation level : 2
+        Priority         : 1 — Critical
+        Minutes open     : {{ event.alerts[0].kibana.alert.grouping.age_minutes }}
+        Situation        : {{ steps.llm_situation.output.data.completion[0].result }}
+        War Room Actions : {{ steps.llm_war_room_actions.output.data.completion[0].result }}
+        Communication    : {{ steps.llm_communication.output.data.completion[0].result }}
