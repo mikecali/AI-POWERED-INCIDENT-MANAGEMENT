@@ -1,0 +1,4 @@
+FROM 2-tier-escalation
+| WHERE alert_status == "fired" OR alert_status == "recovered"
+| KEEP recipe_id, job_id, recipe_name, recipe_domain, error_type, error_message,
+       error_description, severity_level, alert_id, servicenow_ci, timestamp, alert_status, caller_id
