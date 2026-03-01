@@ -1,0 +1,25 @@
+FROM 2-tier-escalation
+| EVAL correlation_key = CONCAT(recipe_id, "-", job_id)
+| EVAL is_fired = CASE(alert_status == "fired", 1, 0)
+| EVAL is_recovered = CASE(alert_status == "recovered", 1, 0)
+| STATS fired_count = SUM(is_fired),
+        recovered_count = SUM(is_recovered),
+        latest_fired = MAX(CASE(alert_status == "fired", timestamp, NULL)),
+        recipe_id = MAX(CASE(alert_status == "fired", recipe_id, NULL)),
+        job_id = MAX(CASE(alert_status == "fired", job_id, NULL)),
+        recipe_name = MAX(CASE(alert_status == "fired", recipe_name, NULL)),
+        recipe_domain = MAX(CASE(alert_status == "fired", recipe_domain, NULL)),
+        error_type = MAX(CASE(alert_status == "fired", error_type, NULL)),
+        error_message = MAX(CASE(alert_status == "fired", error_message, NULL)),
+        error_description = MAX(CASE(alert_status == "fired", error_description, NULL)),
+        severity_level = MAX(CASE(alert_status == "fired", severity_level, NULL)),
+        alert_id = MAX(CASE(alert_status == "fired", alert_id, NULL)),
+        servicenow_ci = MAX(CASE(alert_status == "fired", servicenow_ci, NULL))
+  BY correlation_key
+| WHERE fired_count > 0
+| WHERE recovered_count == 0
+| EVAL age_minutes = DATE_DIFF("minutes", latest_fired, NOW())
+| WHERE age_minutes >= 2
+| WHERE age_minutes < 8
+| KEEP recipe_id, job_id, recipe_name, recipe_domain, error_type, error_message,
+       error_description, severity_level, alert_id, servicenow_ci, latest_fired, age_minutes
