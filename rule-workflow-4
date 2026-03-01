@@ -1,0 +1,35 @@
+FROM 2-tier-escalation
+| WHERE alert_status == "fired"
+| WHERE timestamp > NOW() - 1 hours
+| STATS
+    alert_count       = COUNT(*),
+    first_occurrence  = MIN(timestamp),
+    latest_occurrence = MAX(timestamp),
+    all_services      = VALUES(service_name),
+    all_root_causes   = VALUES(root_cause_suspect),
+    all_error_types   = VALUES(error_type),
+    all_hosts         = VALUES(servicenow_ci),
+    sample_description = MAX(error_description),
+    recipe_domain     = MAX(recipe_domain),
+    recipe_id         = MAX(recipe_id),
+    job_id            = MAX(job_id),
+    alert_id          = MAX(alert_id),
+    severity_level    = MAX(severity_level),
+    servicenow_ci     = MAX(servicenow_ci),
+    timestamp         = MAX(timestamp),
+    alert_status      = MAX(alert_status)
+  BY recipe_domain
+| WHERE alert_count >= 3
+| EVAL window_minutes = DATE_DIFF("minutes", first_occurrence, latest_occurrence)
+| WHERE window_minutes <= 10
+| EVAL first_occurrence_date = DATE_FORMAT("yyyy-MM-dd", first_occurrence)
+| EVAL first_occurrence_time = DATE_FORMAT("HH:mm:ss", first_occurrence)
+| EVAL latest_occurrence_date = DATE_FORMAT("yyyy-MM-dd", latest_occurrence)
+| EVAL latest_occurrence_time = DATE_FORMAT("HH:mm:ss", latest_occurrence)
+| KEEP recipe_id, job_id, recipe_domain, alert_count,
+       first_occurrence, latest_occurrence, window_minutes,
+       first_occurrence_date, first_occurrence_time,
+       latest_occurrence_date, latest_occurrence_time,
+       all_error_types, all_services, all_hosts, all_root_causes,
+       sample_description, severity_level, alert_id, servicenow_ci,
+       timestamp, alert_status
