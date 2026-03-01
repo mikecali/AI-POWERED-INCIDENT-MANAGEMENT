@@ -1,0 +1,122 @@
+name: Workflow2 | ServiceNow Auto-Escalation | SLA Breach Monitor
+description: Escalates unresolved incidents when SLA threshold is breached — LLM generates escalation summary
+enabled: true
+tags:
+  - servicenow
+  - escalation
+  - sla
+  - llm
+
+consts:
+  servicenow_url: "https://dev291312.service-now.com"
+  servicenow_auth: "AAAAAAABBBBBBBBBBbaaaaaaaaaacccccccc"
+  es_url: "https://insignia-demo-0b4ab0.es.us-east-2.aws.elastic-cloud.com"
+  es_auth: "xxxxxxxxx-yyyyyyyyyyyyyyyy-aaaaaaaaaaaaaaaacccccc=="
+  llm_endpoint: "/_inference/completion/.anthropic-claude-3.7-sonnet-completion"
+
+triggers:
+  - type: alert
+
+steps:
+
+  - name: log_escalation_trigger
+    type: console
+    with:
+      message: |
+        [AOF Escalation] SLA breach detected:
+        Recipe  : {{ event.alerts[0].kibana.alert.grouping.recipe_name }}
+        Job     : {{ event.alerts[0].kibana.alert.grouping.job_id }}
+        Domain  : {{ event.alerts[0].kibana.alert.grouping.recipe_domain }}
+        Type    : {{ event.alerts[0].kibana.alert.grouping.error_type }}
+        Message : {{ event.alerts[0].kibana.alert.grouping.error_message }}
+        Severity: {{ event.alerts[0].kibana.alert.grouping.severity_level }}
+
+  # ── STEP 1: FIND THE OPEN INCIDENT ────────────────────────────────────────
+  - name: find_unresolved_incident
+    type: http
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/incident?sysparm_query=correlation_id=AOF-{{ event.alerts[0].kibana.alert.grouping.recipe_id }}-{{ event.alerts[0].kibana.alert.grouping.job_id }}^active=true^stateNOT IN6,7&sysparm_limit=1&sysparm_display_value=false&sysparm_exclude_reference_link=true"
+      method: GET
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+        
+  - name: check_already_escalated
+    type: console
+    with:
+      message: |
+        [AOF Escalation] Escalation check:
+        sys_id     : {{ steps.find_unresolved_incident.output.data.result[0].sys_id }}
+        escalation : {{ steps.find_unresolved_incident.output.data.result[0].escalation }}
+  
+  - name: log_found_incident
+    type: console
+    with:
+      message: |
+        [AOF Escalation] Found unresolved incident:
+        number : {{ steps.find_unresolved_incident.output.data.result[0].number }}
+        sys_id : {{ steps.find_unresolved_incident.output.data.result[0].sys_id }}
+        state  : {{ steps.find_unresolved_incident.output.data.result[0].state }}
+
+  # ── STEP 2: THREE TARGETED LLM CALLS — ONE VALUE EACH ────────────────────
+  - name: llm_escalation_reason
+    type: http
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are an IT escalation manager. Based on this unresolved incident, return ONLY one sentence explaining why it needs immediate attention. No markdown. No line breaks. One sentence only.\n\nError Type   : {{ event.alerts[0].kibana.alert.grouping.error_type }}\nError Message: {{ event.alerts[0].kibana.alert.grouping.error_message }}\nDescription  : {{ event.alerts[0].kibana.alert.grouping.error_description }}\nDomain       : {{ event.alerts[0].kibana.alert.grouping.recipe_domain }}\nSeverity     : {{ event.alerts[0].kibana.alert.grouping.severity_level }}\nOpen Since   : {{ event.alerts[0].kibana.alert.grouping.timestamp }}\nSLA Threshold: 20 minutes unacknowledged"
+
+  - name: llm_business_impact
+    type: http
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are an IT escalation manager. Based on this unresolved incident, return ONLY one sentence describing the business risk if this remains unresolved. No markdown. No line breaks. One sentence only.\n\nError Type   : {{ event.alerts[0].kibana.alert.grouping.error_type }}\nError Message: {{ event.alerts[0].kibana.alert.grouping.error_message }}\nDescription  : {{ event.alerts[0].kibana.alert.grouping.error_description }}\nDomain       : {{ event.alerts[0].kibana.alert.grouping.recipe_domain }}\nSeverity     : {{ event.alerts[0].kibana.alert.grouping.severity_level }}"
+
+  - name: llm_escalation_actions
+    type: http
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are an IT escalation manager. Based on this unresolved incident, return ONLY one sentence describing what the escalation team must do immediately. No markdown. No line breaks. One sentence only.\n\nError Type   : {{ event.alerts[0].kibana.alert.grouping.error_type }}\nError Message: {{ event.alerts[0].kibana.alert.grouping.error_message }}\nDescription  : {{ event.alerts[0].kibana.alert.grouping.error_description }}\nDomain       : {{ event.alerts[0].kibana.alert.grouping.recipe_domain }}\nSeverity     : {{ event.alerts[0].kibana.alert.grouping.severity_level }}"
+
+  # ── STEP 3: ESCALATE — BUMP PRIORITY + ADD WORK NOTE ─────────────────────
+  - name: escalate_incident
+    type: http
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/incident/{{ steps.find_unresolved_incident.output.data.result[0].sys_id }}"
+      method: PATCH
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+      body:
+        priority: 1
+        urgency: 1
+        escalation: 1
+        state: 2
+        work_notes: "=== AOF AUTO-ESCALATION — SLA BREACHED ===\nEscalated at        : {{ event.alerts[0].kibana.alert.grouping.timestamp }}\nSLA Threshold       : 20 minutes — no acknowledgement or resolution detected\nEscalation Reason   : {{ steps.llm_escalation_reason.output.data.completion[0].result }}\nBusiness Impact     : {{ steps.llm_business_impact.output.data.completion[0].result }}\nEscalation Actions  : {{ steps.llm_escalation_actions.output.data.completion[0].result }}\nAOF Alert ID        : {{ event.alerts[0].kibana.alert.grouping.alert_id }}"
+
+  # ── FINAL LOG ──────────────────────────────────────────────────────────────
+  - name: log_escalation_result
+    type: console
+    with:
+      message: |
+        [AOF Escalation] Incident escalated:
+        Incident          : {{ steps.find_unresolved_incident.output.data.result[0].number }}
+        Escalation Reason : {{ steps.llm_escalation_reason.output.data.completion[0].result }}
+        Business Impact   : {{ steps.llm_business_impact.output.data.completion[0].result }}
+        Escalation Actions: {{ steps.llm_escalation_actions.output.data.completion[0].result }}
