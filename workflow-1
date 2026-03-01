@@ -1,0 +1,262 @@
+name: Workflow 1 ServiceNow Incident Triage - ES|QL Alerts | LLM Analysis + Dedup
+description: Creates or closes ServiceNow incidents with LLM triage, duplicate suppression and smart routing
+enabled: true
+tags:
+  - servicenow
+  - incident-management
+  - llm-triage
+  - auto-assign
+  - dedup
+
+consts:
+  servicenow_url: "https://dev291312.service-now.com"
+  servicenow_auth: "YababababbaABBBBBAAAAAAABBBBB"
+  es_url: "https://insignia-demo-0b4ab0.es.us-east-2.aws.elastic-cloud.com"
+  es_auth: "Rxxxxxxxxyyyyyyyyyyyyyyxxxxxxxxxxxxxyyyyyyyyyyyyyyyxxxxxxxxx"
+  llm_endpoint: "/_inference/completion/.anthropic-claude-3.7-sonnet-completion"
+
+triggers:
+  - type: alert
+
+steps:
+
+  - name: log_incoming
+    type: console
+    with:
+      message: |
+        [AOF] Alert received:
+        Recipe  : {{ event.alerts[0].kibana.alert.grouping.recipe_name }}
+        Job     : {{ event.alerts[0].kibana.alert.grouping.job_id }}
+        Status  : {{ event.alerts[0].kibana.alert.grouping.alert_status }}
+        Type    : {{ event.alerts[0].kibana.alert.grouping.error_type }}
+        Message : {{ event.alerts[0].kibana.alert.grouping.error_message }}
+        Severity: {{ event.alerts[0].kibana.alert.grouping.severity_level }}
+
+  # ── DEDUP CHECK ────────────────────────────────────────────────────────────
+  - name: check_duplicate_incident
+    type: http
+    if: "event.alerts[0].kibana.alert.grouping.alert_status : fired"
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/incident?sysparm_query=correlation_id=AOF-{{ event.alerts[0].kibana.alert.grouping.recipe_id }}-{{ event.alerts[0].kibana.alert.grouping.job_id }}^active=true^stateNOT IN6,7&sysparm_limit=1&sysparm_display_value=false&sysparm_exclude_reference_link=true"
+      method: GET
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+
+  - name: add_duplicate_worknote
+    type: http
+    if: "steps.check_duplicate_incident.output.data.result[0].sys_id : *"
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/incident/{{ steps.check_duplicate_incident.output.data.result[0].sys_id }}"
+      method: PATCH
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+      body:
+        work_notes: "=== AOF DUPLICATE ALERT SUPPRESSED ===\nAlert fired again at: {{ event.alerts[0].kibana.alert.grouping.timestamp }}\nAlert ID            : {{ event.alerts[0].kibana.alert.grouping.alert_id }}\nError               : {{ event.alerts[0].kibana.alert.grouping.error_message }}\nAction              : Duplicate suppressed — existing incident {{ steps.check_duplicate_incident.output.data.result[0].number }} remains open."
+
+  - name: log_dedup_result
+    type: console
+    if: "steps.check_duplicate_incident.output.data.result[0].sys_id : *"
+    with:
+      message: |
+        [AOF Dedup] DUPLICATE SUPPRESSED:
+        Existing incident : {{ steps.check_duplicate_incident.output.data.result[0].number }}
+        New alert         : {{ event.alerts[0].kibana.alert.grouping.alert_id }}
+
+  # ── LLM TRIAGE — 6 TARGETED CALLS ─────────────────────────────────────────
+  - name: llm_assignment_group
+    type: http
+    #if: "event.alerts[0].kibana.alert.grouping.alert_status : fired"
+    if: "event.alerts[0].kibana.alert.grouping.alert_status : fired AND NOT steps.check_duplicate_incident.output.data.result[0].sys_id : *"
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are an IT incident routing engine. Return ONLY the assignment group name. One value. No explanation. No punctuation. No extra text.\n\nOVERRIDE RULE: If your analysis identifies C2, beaconing, exfiltration, malware, ransomware, tunneling, compromised, insider threat or supply chain — always return IT Securities regardless of other signals.\n\nROUTING RULES:\n- CPU, Memory, Disk, server → Hardware\n- brute force, privilege, escalation, unauthorized, security, fraud → IT Securities\n- latency, trace, OTel, span, observability → ITSM Engineering\n- database, SQL, DB, query, connection pool → Database\n- OAuth, token, API, authentication, integration → Application Development\n- network, firewall, DNS, routing, connectivity → Network\n- code, exception, runtime, application error → Software\n- else → Service Desk\n\nALERT:\nError Type   : {{ event.alerts[0].kibana.alert.grouping.error_type }}\nError Message: {{ event.alerts[0].kibana.alert.grouping.error_message }}\nDomain       : {{ event.alerts[0].kibana.alert.grouping.recipe_domain }}\n\nRespond with ONLY one of: Network, Database, Hardware, Software, IT Securities, Service Desk, Help Desk, ITSM Engineering, Application Development, Incident Management"
+
+  - name: llm_category
+    type: http
+    #if: "event.alerts[0].kibana.alert.grouping.alert_status : fired"
+    if: "event.alerts[0].kibana.alert.grouping.alert_status : fired AND NOT steps.check_duplicate_incident.output.data.result[0].sys_id : *"
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are an IT incident categorization engine. Return ONLY the category. One word. No explanation. No punctuation. No extra text.\n\nRULES:\n- CPU, Memory, Disk, server → hardware\n- brute force, privilege, escalation, fraud, security → security\n- latency, trace, OTel, span → software\n- database, SQL, DB, query → database\n- network, firewall, DNS → network\n- else → software\n\nALERT:\nError Type   : {{ event.alerts[0].kibana.alert.grouping.error_type }}\nError Message: {{ event.alerts[0].kibana.alert.grouping.error_message }}\n\nRespond with ONLY one of: hardware, software, network, database, security"
+
+  - name: llm_subcategory
+    type: http
+    #if: "event.alerts[0].kibana.alert.grouping.alert_status : fired"
+    if: "event.alerts[0].kibana.alert.grouping.alert_status : fired AND NOT steps.check_duplicate_incident.output.data.result[0].sys_id : *"
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are an IT incident categorization engine. Return ONLY the subcategory. One word. No explanation. No punctuation. No extra text.\n\nRULES:\n- latency, slow, performance, span → performance\n- login, auth, token, OAuth, lockout → authentication\n- down, unavailable, outage, offline → availability\n- privilege, escalation, unauthorized, fraud → access\n- network, firewall, DNS → connectivity\n- else → performance\n\nALERT:\nError Type   : {{ event.alerts[0].kibana.alert.grouping.error_type }}\nError Message: {{ event.alerts[0].kibana.alert.grouping.error_message }}\n\nRespond with ONLY one of: performance, authentication, availability, access, connectivity"
+
+  - name: llm_priority
+    type: http
+    if: "event.alerts[0].kibana.alert.grouping.alert_status : fired AND NOT steps.check_duplicate_incident.output.data.result[0].sys_id : *"
+    #if: "event.alerts[0].kibana.alert.grouping.alert_status : fired"
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "Based on the severity level below, return ONLY the priority number. One number. No explanation. No punctuation. No extra text.\n\nRULES:\n- severity 1 → 1\n- severity 2 → 2\n- severity 3 → 3\n\nSeverity Level: {{ event.alerts[0].kibana.alert.grouping.severity_level }}\n\nRespond with ONLY: 1, 2, or 3"
+
+  - name: llm_diagnosis
+    type: http
+    #if: "event.alerts[0].kibana.alert.grouping.alert_status : fired"
+    if: "event.alerts[0].kibana.alert.grouping.alert_status : fired AND NOT steps.check_duplicate_incident.output.data.result[0].sys_id : *"
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are an IT incident analyst. Return ONLY one sentence technical diagnosis. No markdown. No bullet points. No line breaks. One sentence only.\n\nALERT:\nError Type   : {{ event.alerts[0].kibana.alert.grouping.error_type }}\nError Message: {{ event.alerts[0].kibana.alert.grouping.error_message }}\nDescription  : {{ event.alerts[0].kibana.alert.grouping.error_description }}\nDomain       : {{ event.alerts[0].kibana.alert.grouping.recipe_domain }}"
+
+  - name: llm_actions
+    type: http
+   #if: "event.alerts[0].kibana.alert.grouping.alert_status : fired"
+    if: "event.alerts[0].kibana.alert.grouping.alert_status : fired AND NOT steps.check_duplicate_incident.output.data.result[0].sys_id : *"
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are an IT incident responder. Return ONLY one sentence describing the immediate actions to take. No markdown. No bullet points. No line breaks. One sentence only.\n\nALERT:\nError Type   : {{ event.alerts[0].kibana.alert.grouping.error_type }}\nError Message: {{ event.alerts[0].kibana.alert.grouping.error_message }}\nDescription  : {{ event.alerts[0].kibana.alert.grouping.error_description }}"
+
+  - name: llm_resolution
+    type: http
+    if: "event.alerts[0].kibana.alert.grouping.alert_status : recovered"
+    with:
+      url: "{{ consts.es_url }}{{ consts.llm_endpoint }}"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Authorization: "ApiKey {{ consts.es_auth }}"
+      body:
+        input: "You are an IT incident analyst writing close notes. Return ONLY one sentence summarising how the issue was resolved. No markdown. No bullet points. No line breaks. One sentence only.\n\nALERT:\nError Type   : {{ event.alerts[0].kibana.alert.grouping.error_type }}\nError Message: {{ event.alerts[0].kibana.alert.grouping.error_message }}\nDescription  : {{ event.alerts[0].kibana.alert.grouping.error_description }}"
+
+ 
+  - name: create_servicenow_incident
+    type: http
+ #   if: "event.alerts[0].kibana.alert.grouping.alert_status : fired"
+    if: "event.alerts[0].kibana.alert.grouping.alert_status : fired AND NOT steps.check_duplicate_incident.output.data.result[0].sys_id : *"
+
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/incident"
+      method: POST
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+      body:
+        short_description: "[{{ event.alerts[0].kibana.alert.grouping.error_type }}] {{ event.alerts[0].kibana.alert.grouping.recipe_name }} (Job: {{ event.alerts[0].kibana.alert.grouping.job_id }})"
+        description: "AOF Triage | Recipe: {{ event.alerts[0].kibana.alert.grouping.recipe_id }} | Job: {{ event.alerts[0].kibana.alert.grouping.job_id }} | Domain: {{ event.alerts[0].kibana.alert.grouping.recipe_domain }} | Time: {{ event.alerts[0].kibana.alert.grouping.timestamp }} | Error: {{ event.alerts[0].kibana.alert.grouping.error_message }} | CI: {{ event.alerts[0].kibana.alert.grouping.servicenow_ci }}"
+        correlation_id: "AOF-{{ event.alerts[0].kibana.alert.grouping.recipe_id }}-{{ event.alerts[0].kibana.alert.grouping.job_id }}"
+        severity: "{{ event.alerts[0].kibana.alert.grouping.severity_level }}"
+        urgency: "{{ event.alerts[0].kibana.alert.grouping.severity_level }}"
+        impact: "{{ event.alerts[0].kibana.alert.grouping.severity_level }}"
+        caller_id: "{{ event.alerts[0].kibana.alert.grouping.caller_id }}"
+
+  - name: log_created_incident
+    type: console
+    #if: "event.alerts[0].kibana.alert.grouping.alert_status : fired"
+    if: "event.alerts[0].kibana.alert.grouping.alert_status : fired AND NOT steps.check_duplicate_incident.output.data.result[0].sys_id : *"
+    with:
+      message: |
+        [AOF] Incident created:
+        number : {{ steps.create_servicenow_incident.output.data.result.number }}
+        sys_id : {{ steps.create_servicenow_incident.output.data.result.sys_id }}
+
+  # ── PATCH TRIAGE FIELDS ────────────────────────────────────────────────────
+  - name: patch_incident_triage
+    type: http
+    #if: "event.alerts[0].kibana.alert.grouping.alert_status : fired"
+    if: "event.alerts[0].kibana.alert.grouping.alert_status : fired AND NOT steps.check_duplicate_incident.output.data.result[0].sys_id : *"
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/incident/{{ steps.create_servicenow_incident.output.data.result.sys_id }}"
+      method: PATCH
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+      body:
+        assignment_group: "{{ steps.llm_assignment_group.output.data.completion[0].result }}"
+        category: "{{ steps.llm_category.output.data.completion[0].result }}"
+        subcategory: "{{ steps.llm_subcategory.output.data.completion[0].result }}"
+        priority: "{{ steps.llm_priority.output.data.completion[0].result }}"
+        work_notes: "=== AOF LLM EARLY TRIAGE ===\nDiagnosis           : {{ steps.llm_diagnosis.output.data.completion[0].result }}\nRecommended Actions : {{ steps.llm_actions.output.data.completion[0].result }}\nAssigned To         : {{ steps.llm_assignment_group.output.data.completion[0].result }}"
+
+  # ── CLOSE INCIDENT ─────────────────────────────────────────────────────────
+  - name: find_open_incident
+    type: http
+    if: "event.alerts[0].kibana.alert.grouping.alert_status : recovered"
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/incident?sysparm_query=correlation_id=AOF-{{ event.alerts[0].kibana.alert.grouping.recipe_id }}-{{ event.alerts[0].kibana.alert.grouping.job_id }}^active=true^stateNOT IN6,7&sysparm_limit=1&sysparm_display_value=false&sysparm_exclude_reference_link=true"
+      method: GET
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+
+  - name: close_incident
+    type: http
+    if: "event.alerts[0].kibana.alert.grouping.alert_status : recovered"
+    with:
+      url: "{{ consts.servicenow_url }}/api/now/table/incident/{{ steps.find_open_incident.output.data.result[0].sys_id }}"
+      method: PATCH
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+        Authorization: "Basic {{ consts.servicenow_auth }}"
+      body:
+        state: 6
+        incident_state: 6
+        resolved_at: "{{ event.alerts[0].kibana.alert.grouping.timestamp }}"
+        close_code: "Solution provided"
+        close_notes: "Auto-resolved by AOF LLM Analysis | {{ steps.llm_resolution.output.data.completion[0].result }} | Recovered at: {{ event.alerts[0].kibana.alert.grouping.timestamp }} | Alert ID: {{ event.alerts[0].kibana.alert.grouping.alert_id }}"
+
+  # ── FINAL LOGS ─────────────────────────────────────────────────────────────
+  - name: log_result_fired
+    type: console
+    #if: "event.alerts[0].kibana.alert.grouping.alert_status : fired"
+    if: "event.alerts[0].kibana.alert.grouping.alert_status : fired AND NOT steps.check_duplicate_incident.output.data.result[0].sys_id : *"
+    with:
+      message: |
+        [AOF] Workflow completed (FIRED):
+        Incident         : {{ steps.create_servicenow_incident.output.data.result.number }}
+        Assignment Group : {{ steps.llm_assignment_group.output.data.completion[0].result }}
+        Category         : {{ steps.llm_category.output.data.completion[0].result }}
+        Priority         : {{ steps.llm_priority.output.data.completion[0].result }}
+        Diagnosis        : {{ steps.llm_diagnosis.output.data.completion[0].result }}
+        Actions          : {{ steps.llm_actions.output.data.completion[0].result }}
+
+  - name: log_result_recovered
+    type: console
+    if: "event.alerts[0].kibana.alert.grouping.alert_status : recovered"
+    with:
+      message: |
+        [AOF] Workflow completed (RECOVERED):
+        Incident   : {{ steps.find_open_incident.output.data.result[0].number }}
+        Resolution : {{ steps.llm_resolution.output.data.completion[0].result }}
